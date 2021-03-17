@@ -9,7 +9,9 @@
 #include <algorithm>
 #include <cstdint>
 #include <limits>
+#ifdef ENABLE_PMR
 #include <memory_resource>
+#endif
 #include <numeric>
 #include <vector>
 
@@ -19,7 +21,11 @@ template<class T, bool row_major>
 class solver final
 {
     using bool_t = int_fast8_t;
+#ifdef ENABLE_PMR
     using bool_vector = std::pmr::vector<bool_t>;
+#else
+    using bool_vector = std::vector<bool_t>;
+#endif
 
     T* const data;
     const T epsilon;
@@ -34,7 +40,9 @@ class solver final
     bool_vector new_star_matrix;
 
 public:
-    solver(T* _data, size_t _rows, size_t _cols, size_t _stride, std::pmr::memory_resource& _mem)
+    using allocator_type = typename bool_vector::allocator_type;
+
+    solver(T* _data, size_t _rows, size_t _cols, size_t _stride, const allocator_type& _allocator)
         : data(_data)
         , epsilon([=]
             {
@@ -54,11 +62,11 @@ public:
         , cols(_cols)
         , stride(_stride != 0 ? _stride : row_major ? _cols : _rows)
         , ndims(std::min(_rows, _cols))
-        , covered_cols(_cols, 0, &_mem)
-        , covered_rows(_rows, 0, &_mem)
-        , star_matrix(_cols * _rows, 0, &_mem)
-        , prime_matrix(star_matrix.size(), 0, &_mem)
-        , new_star_matrix(star_matrix.size(), 0, &_mem)
+        , covered_cols(_cols, 0, _allocator)
+        , covered_rows(_rows, 0, _allocator)
+        , star_matrix(_cols * _rows, 0, _allocator)
+        , prime_matrix(star_matrix.size(), 0, _allocator)
+        , new_star_matrix(star_matrix.size(), 0, _allocator)
     {}
 
     solver(const solver&) = delete;
@@ -253,14 +261,25 @@ void solve(std::vector<size_t>& assignment, T* distance_matrix, size_t cols, siz
     static_assert(std::is_arithmetic_v<T>);
     using TT = std::remove_cv_t<T>;
     using solver_t = solver<TT, row_major>;
-    const size_t required_memory = solver_t::required_memory(cols, rows) + (std::is_const_v<T> ? sizeof(T) * cols * rows : 0);
-    std::pmr::monotonic_buffer_resource mem(required_memory);
     TT* data;
     if (stride == (row_major ? cols : rows))
         stride = 0;
+#ifdef ENABLE_PMR
+    const size_t required_memory = solver_t::required_memory(cols, rows) + (std::is_const_v<T> ? sizeof(T) * cols * rows : 0);
+    std::pmr::monotonic_buffer_resource mem(required_memory);
+    typename solver_t::allocator_type alloc{ &mem };
+#else
+    typename solver_t::allocator_type alloc{ };
+    std::vector<TT> copied_data;
+#endif
     if constexpr (std::is_const_v<T>)
     {
-        data = std::pmr::polymorphic_allocator<TT>(&mem).allocate(cols * rows);
+#ifdef ENABLE_PMR
+        data = std::pmr::polymorphic_allocator<TT>(alloc).allocate(cols * rows);
+#else
+        copied_data.resize(cols * rows);
+        data = std::data(copied_data);
+#endif
         if (stride == 0)
             std::uninitialized_copy(distance_matrix, distance_matrix + cols * rows, data);
         else
@@ -269,7 +288,7 @@ void solve(std::vector<size_t>& assignment, T* distance_matrix, size_t cols, siz
     }
     else
         data = distance_matrix;
-    solver_t s(data, rows, cols, stride, mem);
+    solver_t s(data, rows, cols, stride, alloc);
     s.solve(assignment);
 }
 
